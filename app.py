@@ -8,7 +8,16 @@ import base64
 app = FastAPI(title="YOLOv5 Normalized Output API")
 
 # Load model offline from your local windows cache
-model = torch.hub.load(r'C:\Users\krish\.cache\torch\hub\ultralytics_yolov5_master', 'custom', path='best.pt', source='local')
+# model = torch.hub.load(r'C:\Users\krish\.cache\torch\hub\ultralytics_yolov5_master', 'custom', path='best.pt', source='local')
+# Look for the github online version but allow online hub fallback on the cloud
+try:
+    # This tells Render to fetch the fresh architecture code from GitHub and load your local 'best.pt'
+    model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
+except Exception as e:
+    # If there is a network block, this is an automatic fallback
+    print(f"Hub loading failed, attempting alternative: {e}")
+    raise e
+
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
