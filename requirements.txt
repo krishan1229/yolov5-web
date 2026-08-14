@@ -6,5 +6,5 @@ torchvision
 pillow
 python-multipart
 pandas
+setuptools
 yolov5
-
