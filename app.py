@@ -1,23 +1,28 @@
+import os
+# 1. FORCE SYSTEM TO MINIMIZE THREADS (Saves massive RAM buffers)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 import torch
 from PIL import Image, ImageDraw
 import io
 import base64
+import gc
 
-app = FastAPI(title="YOLOv5 Normalized Output API")
+app = FastAPI(title="YOLOv5 Low-Memory API")
 
-# Load model offline from your local windows cache
-# model = torch.hub.load(r'C:\Users\krish\.cache\torch\hub\ultralytics_yolov5_master', 'custom', path='best.pt', source='local')
-# Look for the github online version but allow online hub fallback on the cloud
-try:
-    # This tells Render to fetch the fresh architecture code from GitHub and load your local 'best.pt'
+# 2. Limit PyTorch internally to 1 single CPU thread to freeze memory expansion
+torch.set_num_threads(1)
+
+# 3. Load the model inside an absolute zero-gradient memory block
+with torch.no_grad():
     model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
-except Exception as e:
-    # If there is a network block, this is an automatic fallback
-    print(f"Hub loading failed, attempting alternative: {e}")
-    raise e
+    model.eval()  # Set model to evaluation mode permanently
 
+# 4. Force memory cleanup right after loading weights
+gc.collect()
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
@@ -85,7 +90,6 @@ async def home_page():
                 if (fileInput.files.length === 0) return;
 
                 const formData = new FormData();
-                // FIX: Grabbed index [0] to resolve the 422 submission block safely
                 formData.append("file", fileInput.files[0]);
                 formData.append("conf_thresh", confSlider.value);
                 formData.append("iou_thresh", iouSlider.value);
@@ -141,27 +145,27 @@ async def predict_thresholds(
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    # Set parameters
-    model.conf = conf_thresh
-    model.iou = iou_thresh
+    # 5. Lock model parameters safely inside an evaluation context
+    with torch.no_grad():
+        model.conf = conf_thresh
+        model.iou = iou_thresh
+        results = model(image)
 
-    # Run inference
-    results = model(image)
-    
-    # FIX: Isolated index [0] on both datasets to prevent index crashes
     pred_pixels = results.pandas().xyxy[0].to_dict(orient="records")
     pred_scaled = results.pandas().xyxyn[0].to_dict(orient="records")
 
-    # Manually draw boxes using pixel data structures
     draw = ImageDraw.Draw(image)
     for pred in pred_pixels:
         box = [pred['xmin'], pred['ymin'], pred['xmax'], pred['ymax']]
-        draw.rectangle(box, outline="blue", width=1)
+        draw.rectangle(box, outline="red", width=4)
 
-    # Encode modified photo
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    # 6. Delete big variables from RAM and call trash collection
+    del results, image, image_bytes
+    gc.collect()
 
     return {
         "image": img_str,
@@ -170,4 +174,5 @@ async def predict_thresholds(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # 7. Start uvicorn with absolute minimum overhead workers
+    uvicorn.run(app, host="0.0.0.0", port=8000)
