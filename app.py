@@ -1,56 +1,26 @@
 import os
-import sys
-import zipfile
-import urllib.request
-
 # 1. FORCE THE CLOUD SYSTEM TO MINIMIZE THREADS (Saves massive RAM memory)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-# 2. AUTOMATIC CORE DOWNLOADER (Bypasses Render Cache and GitHub Blocks!)
-# This downloads the official YOLOv5 codebase directly into Render's active memory
-YOLO_DIR = "yolov5-master"
-if not os.path.exists(YOLO_DIR):
-    print("Downloading YOLOv5 architecture core files...")
-    zip_url = "https://github.com"
-    zip_path = "yolov5.zip"
-    
-    # FIX: Add a custom Request with a common web browser header to bypass GitHub block
-    req = urllib.request.Request(
-        zip_url, 
-        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    )
-    
-    # Download the repository zip file safely
-    with urllib.request.urlopen(req) as response, open(zip_path, 'wb') as out_file:
-        out_file.write(response.read())
-        
-    # Unpack it safely into the cloud workspace
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(".")
-    
-    # Clean up the zip file to save space
-    os.remove(zip_path)
-    print("YOLOv5 core extracted successfully!")
-
-# Insert the newly downloaded folders into the active Python environment path
-sys.path.insert(0, os.path.abspath(YOLO_DIR))
-
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
-import torch
+import yolov5  # Using the clean packaged module directly!
 from PIL import Image, ImageDraw
 import io
 import base64
 import gc
 
-app = FastAPI(title="YOLOv5 Live Public API")
-torch.set_num_threads(1)
+app = FastAPI(title="YOLOv5 Packaged Cloud API")
 
-# 3. Load the model directly using the newly unzipped engine folder path
-with torch.no_grad():
-    model = torch.hub.load(YOLO_DIR, 'custom', path='best.pt', source='local')
+# 2. Load your custom model directly from the root repository folder
+# The yolov5 module handles the layout blueprints completely offline!
+try:
+    model = yolov5.load('best.pt')
     model.eval()
+except Exception as e:
+    print(f"Model loading failed: {e}")
+    raise e
 
 gc.collect()
 
@@ -111,7 +81,7 @@ async def home_page():
                 const detailsList = document.getElementById('detailsList');
                 if (fileInput.files.length === 0) return;
                 const formData = new FormData();
-                formData.append("file", fileInput.files[0]);
+                formData.append("file", fileInput.files);
                 formData.append("conf_thresh", confSlider.value);
                 formData.append("iou_thresh", iouSlider.value);
                 try {
@@ -156,10 +126,10 @@ async def predict_thresholds(
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    with torch.no_grad():
-        model.conf = conf_thresh
-        model.iou = iou_thresh
-        results = model(image)
+    # Set parameters on the module model
+    model.conf = conf_thresh [1.21]
+    model.iou = iou_thresh [1.21]
+    results = model(image) [1.21]
 
     pred_pixels = results.pandas().xyxy[0].to_dict(orient="records")
     pred_scaled = results.pandas().xyxyn[0].to_dict(orient="records")
