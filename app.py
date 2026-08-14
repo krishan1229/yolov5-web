@@ -1,7 +1,33 @@
 import os
-# 1. FORCE SYSTEM TO MINIMIZE THREADS (Saves massive RAM buffers)
+import sys
+import zipfile
+import urllib.request
+
+# 1. FORCE THE CLOUD SYSTEM TO MINIMIZE THREADS (Saves massive RAM memory)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+
+# 2. AUTOMATIC CORE DOWNLOADER (Bypasses Render's glitched build cache)
+# This downloads the official YOLOv5 codebase directly into Render's active memory
+YOLO_DIR = "yolov5-master"
+if not os.path.exists(YOLO_DIR):
+    print("Downloading YOLOv5 architecture core files...")
+    zip_url = "https://github.com"
+    zip_path = "yolov5.zip"
+    
+    # Download the repository zip file
+    urllib.request.urlretrieve(zip_url, zip_path)
+    
+    # Unpack it safely into the cloud workspace
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(".")
+    
+    # Clean up the zip file to save space
+    os.remove(zip_path)
+    print("YOLOv5 core extracted successfully!")
+
+# Insert the newly downloaded folders into the active Python environment path
+sys.path.insert(0, os.path.abspath(YOLO_DIR))
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
@@ -11,26 +37,14 @@ import io
 import base64
 import gc
 
-app = FastAPI(title="YOLOv5 Low-Memory API")
-
-# 2. Limit PyTorch internally to 1 single CPU thread to freeze memory expansion
+app = FastAPI(title="YOLOv5 Live Public API")
 torch.set_num_threads(1)
 
-# 3. Load the model inside an absolute zero-gradient memory block
+# 3. Load the model directly using the newly unzipped engine folder path
 with torch.no_grad():
-    # model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
-    # Force completely offline loading using the cloned local folder
-    # Look for the structural scripts inside the same root workspace directory
-    try:
-        model = torch.hub.load('.', 'custom', path='best.pt', source='local')
-        model.eval()
-    except Exception as e:
-        print(f"Local root loading failed: {e}")
-        raise e
+    model = torch.hub.load(YOLO_DIR, 'custom', path='best.pt', source='local')
+    model.eval()
 
-    model.eval()  # Set model to evaluation mode permanently
-
-# 4. Force memory cleanup right after loading weights
 gc.collect()
 
 @app.get("/", response_class=HTMLResponse)
@@ -57,10 +71,8 @@ async def home_page():
     <body>
         <div class="container">
             <h2>YOLOv5 Object Detector (Scaled Coordinates 0 to 1)</h2>
-            
             <form id="uploadForm">
                 <input type="file" id="imageInput" accept="image/*" required><br><br>
-                
                 <div class="controls">
                     <div class="slider-group">
                         <label><b>Conf Threshold:</b> <span id="confVal">0.25</span></label>
@@ -71,21 +83,16 @@ async def home_page():
                         <input type="range" id="iouSlider" min="0.05" max="1.0" step="0.05" value="0.45" oninput="document.getElementById('iouVal').innerText=this.value">
                     </div>
                 </div>
-                
                 <button type="submit">Analyze Image</button>
             </form>
-            
             <div class="content-box">
-                <div class="view-panel">
-                    <img id="resultImg" src="" alt="Detection Output">
-                </div>
+                <div class="view-panel"><img id="resultImg" src="" alt="Detection Output"></div>
                 <div class="text-panel" id="textPanel">
                     <h3>📊 Scaled Detection Details</h3>
                     <div id="detailsList"></div>
                 </div>
             </div>
         </div>
-
         <script>
             document.getElementById('uploadForm').onsubmit = async (e) => {
                 e.preventDefault();
@@ -95,25 +102,17 @@ async def home_page():
                 const resultImg = document.getElementById('resultImg');
                 const textPanel = document.getElementById('textPanel');
                 const detailsList = document.getElementById('detailsList');
-                
                 if (fileInput.files.length === 0) return;
-
                 const formData = new FormData();
                 formData.append("file", fileInput.files[0]);
                 formData.append("conf_thresh", confSlider.value);
                 formData.append("iou_thresh", iouSlider.value);
-
                 try {
-                    const response = await fetch('/predict-thresholds', {
-                        method: 'POST',
-                        body: formData
-                    });
-
+                    const response = await fetch('/predict-thresholds', { method: 'POST', body: formData });
                     if (response.ok) {
                         const data = await response.json();
                         resultImg.src = "data:image/jpeg;base64," + data.image;
                         resultImg.style.display = 'block';
-                        
                         detailsList.innerHTML = "";
                         if (data.predictions.length === 0) {
                             detailsList.innerHTML = "<p>No objects detected.</p>";
@@ -132,12 +131,8 @@ async def home_page():
                             });
                         }
                         textPanel.style.display = 'block';
-                    } else {
-                        alert('Error processing inference data on the server.');
-                    }
-                } catch (err) {
-                    alert('Network error connecting to the API.');
-                }
+                    } else { alert('Error processing inference data.'); }
+                } catch (err) { alert('Network error connecting to the API.'); }
             };
         </script>
     </body>
@@ -154,7 +149,6 @@ async def predict_thresholds(
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    # 5. Lock model parameters safely inside an evaluation context
     with torch.no_grad():
         model.conf = conf_thresh
         model.iou = iou_thresh
@@ -172,16 +166,11 @@ async def predict_thresholds(
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    # 6. Delete big variables from RAM and call trash collection
     del results, image, image_bytes
     gc.collect()
 
-    return {
-        "image": img_str,
-        "predictions": pred_scaled
-    }
+    return {"image": img_str, "predictions": pred_scaled}
 
 if __name__ == "__main__":
     import uvicorn
-    # 7. Start uvicorn with absolute minimum overhead workers
     uvicorn.run(app, host="0.0.0.0", port=8000)
