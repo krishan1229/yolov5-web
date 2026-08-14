@@ -7,7 +7,7 @@ import urllib.request
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-# 2. AUTOMATIC CORE DOWNLOADER (Bypasses Render's glitched build cache)
+# 2. AUTOMATIC CORE DOWNLOADER (Bypasses Render Cache and GitHub Blocks!)
 # This downloads the official YOLOv5 codebase directly into Render's active memory
 YOLO_DIR = "yolov5-master"
 if not os.path.exists(YOLO_DIR):
@@ -15,9 +15,16 @@ if not os.path.exists(YOLO_DIR):
     zip_url = "https://github.com"
     zip_path = "yolov5.zip"
     
-    # Download the repository zip file
-    urllib.request.urlretrieve(zip_url, zip_path)
+    # FIX: Add a custom Request with a common web browser header to bypass GitHub block
+    req = urllib.request.Request(
+        zip_url, 
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    )
     
+    # Download the repository zip file safely
+    with urllib.request.urlopen(req) as response, open(zip_path, 'wb') as out_file:
+        out_file.write(response.read())
+        
     # Unpack it safely into the cloud workspace
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(".")
