@@ -6,5 +6,5 @@ torchvision
 pillow
 python-multipart
 pandas
-setuptools
+setuptools==81.0.0
 yolov5
