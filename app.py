@@ -18,7 +18,14 @@ torch.set_num_threads(1)
 
 # 3. Load the model inside an absolute zero-gradient memory block
 with torch.no_grad():
-    model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
+    # model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
+    # Force completely offline loading using the cloned local folder
+    try:
+        model = torch.hub.load('yolov5', 'custom', path='best.pt', source='local')
+        model.eval()
+    except Exception as e:
+        print(f"Offline model loading failed: {e}")
+        raise e
     model.eval()  # Set model to evaluation mode permanently
 
 # 4. Force memory cleanup right after loading weights
