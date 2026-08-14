@@ -20,12 +20,14 @@ torch.set_num_threads(1)
 with torch.no_grad():
     # model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True, trust_repo=True)
     # Force completely offline loading using the cloned local folder
+    # Look for the structural scripts inside the same root workspace directory
     try:
-        model = torch.hub.load('yolov5', 'custom', path='best.pt', source='local')
+        model = torch.hub.load('.', 'custom', path='best.pt', source='local')
         model.eval()
     except Exception as e:
-        print(f"Offline model loading failed: {e}")
+        print(f"Local root loading failed: {e}")
         raise e
+
     model.eval()  # Set model to evaluation mode permanently
 
 # 4. Force memory cleanup right after loading weights
