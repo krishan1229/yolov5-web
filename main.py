@@ -79,7 +79,7 @@ async def home_page():
     </head>
     <body>
         <div class="container">
-            <h2>YOLOv5 Object Detector (ONNX Low-Memory Cloud)</h2>
+            <h2>YOLO-LMD (ONNX)</h2>
             <form id="uploadForm">
                 <input type="file" id="imageInput" accept="image/*" required><br><br>
                 <div class="controls">
