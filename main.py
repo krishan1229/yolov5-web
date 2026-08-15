@@ -147,15 +147,19 @@ async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = 
                 x2 = min(224.0, x_center + w / 2)
                 y2 = min(224.0, y_center + h / 2)
 
-                # Generate clean ratios (0 to 1)
-                xmin, ymin = x1 / 224.0, y1 / 224.0
-                xmax, ymax = x2 / 224.0, y2 / 224.0
-
+                # Generate clean ratios (0 to 1) and force them to standard python floats
+                xmin, ymin = float(x1 / 224.0), float(y1 / 224.0)
+                xmax, ymax = float(x2 / 224.0), float(y2 / 224.0)
+                
                 predictions.append({
-                    "class_id": class_id,
-                    "confidence": confidence,
-                    "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
+                    "class_id": int(class_id),
+                    "confidence": float(confidence),
+                    "xmin": xmin, 
+                    "ymin": ymin, 
+                    "xmax": xmax, 
+                    "ymax": ymax
                 })
+
 
                 draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="red", width=4)
 
