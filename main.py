@@ -161,7 +161,7 @@ async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = 
                 })
 
 
-                draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="red", width=4)
+                draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="blue", width=1)
 
     buffered = io.BytesIO()
     original_image.save(buffered, format="JPEG")
