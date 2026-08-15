@@ -11,7 +11,7 @@ import numpy as np
 import onnxruntime as ort
 import gc
 
-app = FastAPI(title="YOLOv5 (onnx) Framework API")
+app = FastAPI(title="YOLOv5 Zero-Framework ONNX API")
 
 # Initialize the ONNX session with disabled memory optimization structures to save space
 opts = ort.SessionOptions()
@@ -20,7 +20,40 @@ opts.enable_cpu_mem_arena = False
 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
 session = ort.InferenceSession("best.onnx", sess_options=opts, providers=['CPUExecutionProvider'])
-input_name = session.get_inputs()[0].name
+input_name = session.get_inputs().name
+
+# --- Pure NumPy Non-Maximum Suppression (NMS) Function ---
+def nms(boxes, scores, iou_threshold):
+    if len(boxes) == 0:
+        return []
+    
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+    
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        
+        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+        inds = np.where(ovr <= iou_threshold)[0]
+        order = order[inds + 1]
+        
+    return keep
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
@@ -53,6 +86,11 @@ async def home_page():
                         <label><b>Conf Threshold:</b> <span id="confVal">0.25</span></label>
                         <input type="range" id="confSlider" min="0.05" max="1.0" step="0.05" value="0.25" oninput="document.getElementById('confVal').innerText=this.value">
                     </div>
+                    <!-- Added IOU Threshold Slider back to interface -->
+                    <div class="slider-group">
+                        <label><b>IOU Threshold (Overlap Control):</b> <span id="iouVal">0.45</span></label>
+                        <input type="range" id="iouSlider" min="0.05" max="1.0" step="0.05" value="0.45" oninput="document.getElementById('iouVal').innerText=this.value">
+                    </div>
                 </div>
                 <button type="submit">Analyze Image</button>
             </form>
@@ -69,6 +107,7 @@ async def home_page():
                 e.preventDefault();
                 const fileInput = document.getElementById('imageInput');
                 const confSlider = document.getElementById('confSlider');
+                const iouSlider = document.getElementById('iouSlider');
                 const resultImg = document.getElementById('resultImg');
                 const textPanel = document.getElementById('textPanel');
                 const detailsList = document.getElementById('detailsList');
@@ -77,6 +116,7 @@ async def home_page():
                 const formData = new FormData();
                 formData.append("file", fileInput.files[0]);
                 formData.append("conf_thresh", confSlider.value);
+                formData.append("iou_thresh", iouSlider.value);
                 
                 try {
                     const response = await fetch('/predict-thresholds', { method: 'POST', body: formData });
@@ -86,7 +126,7 @@ async def home_page():
                         resultImg.style.display = 'block';
                         detailsList.innerHTML = "";
                         if (data.predictions.length === 0) {
-                            detailsList.innerHTML = "<p>No objects detected with current threshold.</p>";
+                            detailsList.innerHTML = "<p>No objects detected with current thresholds.</p>";
                         } else {
                             data.predictions.forEach((item, index) => {
                                 const pct = (item.confidence * 100).toFixed(1);
@@ -112,25 +152,27 @@ async def home_page():
     return HTMLResponse(content=html_content)
 
 @app.post("/predict-thresholds")
-async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = Form(0.25)):
+async def predict_thresholds(
+    file: UploadFile = File(...), 
+    conf_thresh: float = Form(0.25),
+    iou_thresh: float = Form(0.45)
+):
     image_bytes = await file.read()
     original_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     orig_w, orig_h = original_image.size
 
-    # Resize input matching your local 224 structural transformation format
     img = original_image.resize((224, 224))
     img_data = np.array(img, dtype=np.float32) / 255.0
     img_data = np.transpose(img_data, (2, 0, 1))
     img_data = np.expand_dims(img_data, axis=0)
 
-    # Execute math session
     outputs = session.run(None, {input_name: img_data})
-    output = np.squeeze(outputs[0])  # Access raw prediction matrix layer
+    output = np.squeeze(outputs)
 
-    predictions = []
-    draw = ImageDraw.Draw(original_image)
+    candidate_boxes = []
+    candidate_scores = []
+    candidate_classes = []
 
-    # Standard loop to match YOLOv5 outputs shapes directly
     if len(output.shape) == 2:
         for row in output:
             objectness = row[4]
@@ -141,37 +183,38 @@ async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = 
             if confidence >= conf_thresh:
                 x_center, y_center, w, h = row[0], row[1], row[2], row[3]
                 
-                # Convert boundaries safely relative to 224 grid limits
                 x1 = max(0.0, x_center - w / 2)
                 y1 = max(0.0, y_center - h / 2)
                 x2 = min(224.0, x_center + w / 2)
                 y2 = min(224.0, y_center + h / 2)
 
-                # Generate clean ratios (0 to 1) and force them to standard python floats
-                xmin, ymin = float(x1 / 224.0), float(y1 / 224.0)
-                xmax, ymax = float(x2 / 224.0), float(y2 / 224.0)
-                
-                predictions.append({
-                    "class_id": int(class_id),
-                    "confidence": float(confidence),
-                    "xmin": xmin, 
-                    "ymin": ymin, 
-                    "xmax": xmax, 
-                    "ymax": ymax
-                })
+                candidate_boxes.append([x1, y1, x2, y2])
+                candidate_scores.append(confidence)
+                candidate_classes.append(class_id)
 
+    predictions = []
+    draw = ImageDraw.Draw(original_image)
 
-                draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="blue", width=1)
+    # Apply NMS calculations to clean up overlapping candidate boxes
+    if len(candidate_boxes) > 0:
+        np_boxes = np.array(candidate_boxes, dtype=np.float32)
+        np_scores = np.array(candidate_scores, dtype=np.float32)
+        
+        keep_indices = nms(np_boxes, np_scores, iou_thresh)
+        
+        for idx in keep_indices:
+            box224 = candidate_boxes[idx]
+            confidence = candidate_scores[idx]
+            class_id = candidate_classes[idx]
 
-    buffered = io.BytesIO()
-    original_image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            xmin, ymin = float(box224[0] / 224.0), float(box224[1] / 224.0)
+            xmax, ymax = float(box224[2] / 224.0), float(box224[3] / 224.0)
 
-    del original_image, image_bytes, img_data, outputs, output
-    gc.collect()
+            predictions.append({
+                "class_id": int(class_id),
+                "confidence": float(confidence),
+                "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
+            })
 
-    return {"image": img_str, "predictions": predictions}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+            # UPDATED STYLE: Bounding box drawn in blue with width 1
+            draw.rectangle(
