@@ -11,7 +11,7 @@ import numpy as np
 import onnxruntime as ort
 import gc
 
-app = FastAPI(title="YOLOv5 Zero-Framework ONNX API")
+app = FastAPI(title="YOLO-LMD ONNX API")
 
 # Initialize the ONNX session with disabled memory optimization structures to save space
 opts = ort.SessionOptions()
