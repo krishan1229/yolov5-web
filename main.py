@@ -20,7 +20,8 @@ opts.enable_cpu_mem_arena = False
 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
 session = ort.InferenceSession("best.onnx", sess_options=opts, providers=['CPUExecutionProvider'])
-input_name = session.get_inputs().name
+input_name = session.get_inputs()[0].name
+
 
 # --- Pure NumPy Non-Maximum Suppression (NMS) Function ---
 def nms(boxes, scores, iou_threshold):
