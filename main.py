@@ -217,4 +217,17 @@ async def predict_thresholds(
             })
 
             # UPDATED STYLE: Bounding box drawn in blue with width 1
-            draw.rectangle(
+            draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="blue", width=1)
+
+    buffered = io.BytesIO()
+    original_image.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    del original_image, image_bytes, img_data, outputs, output
+    gc.collect()
+
+    return {"image": img_str, "predictions": predictions}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
