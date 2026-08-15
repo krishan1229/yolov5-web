@@ -1,25 +1,23 @@
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
-import yolov5 
 from PIL import Image, ImageDraw
 import io
 import base64
-import gc
+import numpy as np
+import onnxruntime as ort
 
-app = FastAPI(title="YOLOv5 Packaged Cloud API")
+app = FastAPI(title="YOLOv5 Ultra-Light ONNX API")
 
-try:
-    model = yolov5.load('best.pt')
-    model.eval()
-except Exception as e:
-    print(f"Model loading failed: {e}")
-    raise e
+# Load the ONNX model (Takes only ~40MB of RAM!)
+cuda = False
+providers = ['CPUExecutionProvider']
+session = ort.InferenceSession("best.onnx", providers=providers)
 
-gc.collect()
+# Get model input details
+input_name = session.get_inputs()[0].name
+input_shape = session.get_inputs()[0].shape  # Usually [1, 3, 640, 640]
+img_size = input_shape[2] if len(input_shape) == 4 else 640
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
@@ -27,7 +25,7 @@ async def home_page():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>YOLOv5 Scaled Detector</title>
+        <title>YOLOv5 ONNX Cloud Detector</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 30px; background-color: #f4f4f9; text-align: center; }
             .container { background: white; padding: 30px; border-radius: 10px; display: inline-block; box-shadow: 0px 0px 10px rgba(0,0,0,0.1); width: 85%; max-width: 1000px; }
@@ -44,17 +42,13 @@ async def home_page():
     </head>
     <body>
         <div class="container">
-            <h2>YOLOv5 Object Detector (Scaled Coordinates 0 to 1)</h2>
+            <h2>YOLOv5 Object Detector (ONNX Low-Memory Cloud)</h2>
             <form id="uploadForm">
                 <input type="file" id="imageInput" accept="image/*" required><br><br>
                 <div class="controls">
                     <div class="slider-group">
                         <label><b>Conf Threshold:</b> <span id="confVal">0.25</span></label>
                         <input type="range" id="confSlider" min="0.05" max="1.0" step="0.05" value="0.25" oninput="document.getElementById('confVal').innerText=this.value">
-                    </div>
-                    <div class="slider-group">
-                        <label><b>IOU Threshold:</b> <span id="iouVal">0.45</span></label>
-                        <input type="range" id="iouSlider" min="0.05" max="1.0" step="0.05" value="0.45" oninput="document.getElementById('iouVal').innerText=this.value">
                     </div>
                 </div>
                 <button type="submit">Analyze Image</button>
@@ -72,15 +66,13 @@ async def home_page():
                 e.preventDefault();
                 const fileInput = document.getElementById('imageInput');
                 const confSlider = document.getElementById('confSlider');
-                const iouSlider = document.getElementById('iouSlider');
                 const resultImg = document.getElementById('resultImg');
                 const textPanel = document.getElementById('textPanel');
                 const detailsList = document.getElementById('detailsList');
                 if (fileInput.files.length === 0) return;
                 const formData = new FormData();
-                formData.append("file", fileInput.files);
+                formData.append("file", fileInput.files[0]);
                 formData.append("conf_thresh", confSlider.value);
-                formData.append("iou_thresh", iouSlider.value);
                 try {
                     const response = await fetch('/predict-thresholds', { method: 'POST', body: formData });
                     if (response.ok) {
@@ -95,7 +87,7 @@ async def home_page():
                                 const pct = (item.confidence * 100).toFixed(1);
                                 detailsList.innerHTML += `
                                     <div class="detection-item">
-                                        <strong>Object #${index + 1}:</strong> ${item.name}<br>
+                                        <strong>Object #${index + 1}:</strong> Object Class ID: ${item.class_id}<br>
                                         🎯 <strong>Confidence:</strong> ${pct}%<br>
                                         📍 <strong>Normalized Box (0 to 1):</strong><br>
                                         &nbsp;&nbsp;&bull; Xmin: ${item.xmin.toFixed(4)} &nbsp;|&nbsp; Ymin: ${item.ymin.toFixed(4)}<br>
@@ -115,35 +107,53 @@ async def home_page():
     return HTMLResponse(content=html_content)
 
 @app.post("/predict-thresholds")
-async def predict_thresholds(
-    file: UploadFile = File(...), 
-    conf_thresh: float = Form(0.25), 
-    iou_thresh: float = Form(0.45)
-):
+async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = Form(0.25)):
     image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    original_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    orig_w, orig_h = original_image.size
 
-    model.conf = conf_thresh
-    model.iou = iou_thresh
-    results = model(image)
+    # Resize and normalize image for ONNX input
+    img = original_image.resize((img_size, img_size))
+    img_data = np.array(img, dtype=np.float32) / 255.0
+    img_data = np.transpose(img_data, (2, 0, 1))  # HWC to CHW
+    img_data = np.expand_dims(img_data, axis=0)    # Add batch dimension
 
-    pred_pixels = results.pandas().xyxy.to_dict(orient="records")
-    pred_scaled = results.pandas().xyxyn.to_dict(orient="records")
+    # Run ONNX inference
+    outputs = session.run(None, {input_name: img_data})
+    output = outputs[0][0]  # Grab primary predictions matrix
 
-    draw = ImageDraw.Draw(image)
-    for pred in pred_pixels:
-        box = [pred['xmin'], pred['ymin'], pred['xmax'], pred['ymax']]
-        draw.rectangle(box, outline="red", width=4)
+    predictions = []
+    draw = ImageDraw.Draw(original_image)
 
+    # Parse bounding boxes
+    for row in output:
+        confidence = float(row[4])
+        if confidence >= conf_thresh:
+            # Get highest class score
+            class_scores = row[5:]
+            class_id = int(np.argmax(class_scores))
+            class_conf = float(class_scores[class_id])
+            
+            if class_conf > 0.25:
+                # Convert center x, center y, width, height format to 0-1 scale coordinates
+                x_center, y_center, w, h = row[0]/img_size, row[1]/img_size, row[2]/img_size, row[3]/img_size
+                xmin = max(0.0, x_center - w / 2)
+                ymin = max(0.0, y_center - h / 2)
+                xmax = min(1.0, x_center + w / 2)
+                ymax = min(1.0, y_center + h / 2)
+
+                predictions.append({
+                    "class_id": class_id,
+                    "confidence": confidence,
+                    "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
+                })
+
+                # Draw bounding box using original raw pixel coordinates
+                draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="red", width=4)
+
+    # Encode image back to base64 string
     buffered = io.BytesIO()
-    image.save(buffered, format="JPEG")
+    original_image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    del results, image, image_bytes
-    gc.collect()
-
-    return {"image": img_str, "predictions": pred_scaled}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return {"image": img_str, "predictions": predictions}
