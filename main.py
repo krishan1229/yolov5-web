@@ -1,4 +1,7 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from PIL import Image, ImageDraw
@@ -6,18 +9,18 @@ import io
 import base64
 import numpy as np
 import onnxruntime as ort
+import gc
 
-app = FastAPI(title="YOLOv5 Ultra-Light ONNX API")
+app = FastAPI(title="YOLOv5 Zero-Framework ONNX API")
 
-# Load the ONNX model (Takes only ~40MB of RAM!)
-cuda = False
-providers = ['CPUExecutionProvider']
-session = ort.InferenceSession("best.onnx", providers=providers)
+# Initialize the ONNX session with disabled memory optimization structures to save space
+opts = ort.SessionOptions()
+opts.enable_mem_pattern = False
+opts.enable_cpu_mem_arena = False
+opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
-# Get model input details
+session = ort.InferenceSession("best.onnx", sess_options=opts, providers=['CPUExecutionProvider'])
 input_name = session.get_inputs()[0].name
-input_shape = session.get_inputs()[0].shape  # Usually [1, 3, 640, 640]
-img_size = input_shape[2] if len(input_shape) == 4 else 640
 
 @app.get("/", response_class=HTMLResponse)
 async def home_page():
@@ -70,9 +73,11 @@ async def home_page():
                 const textPanel = document.getElementById('textPanel');
                 const detailsList = document.getElementById('detailsList');
                 if (fileInput.files.length === 0) return;
+                
                 const formData = new FormData();
                 formData.append("file", fileInput.files[0]);
                 formData.append("conf_thresh", confSlider.value);
+                
                 try {
                     const response = await fetch('/predict-thresholds', { method: 'POST', body: formData });
                     if (response.ok) {
@@ -81,13 +86,13 @@ async def home_page():
                         resultImg.style.display = 'block';
                         detailsList.innerHTML = "";
                         if (data.predictions.length === 0) {
-                            detailsList.innerHTML = "<p>No objects detected.</p>";
+                            detailsList.innerHTML = "<p>No objects detected with current threshold.</p>";
                         } else {
                             data.predictions.forEach((item, index) => {
                                 const pct = (item.confidence * 100).toFixed(1);
                                 detailsList.innerHTML += `
                                     <div class="detection-item">
-                                        <strong>Object #${index + 1}:</strong> Object Class ID: ${item.class_id}<br>
+                                        <strong>Object #${index + 1}:</strong> Class ID ${item.class_id}<br>
                                         🎯 <strong>Confidence:</strong> ${pct}%<br>
                                         📍 <strong>Normalized Box (0 to 1):</strong><br>
                                         &nbsp;&nbsp;&bull; Xmin: ${item.xmin.toFixed(4)} &nbsp;|&nbsp; Ymin: ${item.ymin.toFixed(4)}<br>
@@ -112,35 +117,39 @@ async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = 
     original_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     orig_w, orig_h = original_image.size
 
-    # Resize and normalize image for ONNX input
-    img = original_image.resize((img_size, img_size))
+    # Resize input matching your local 224 structural transformation format
+    img = original_image.resize((224, 224))
     img_data = np.array(img, dtype=np.float32) / 255.0
-    img_data = np.transpose(img_data, (2, 0, 1))  # HWC to CHW
-    img_data = np.expand_dims(img_data, axis=0)    # Add batch dimension
+    img_data = np.transpose(img_data, (2, 0, 1))
+    img_data = np.expand_dims(img_data, axis=0)
 
-    # Run ONNX inference
+    # Execute math session
     outputs = session.run(None, {input_name: img_data})
-    output = outputs[0][0]  # Grab primary predictions matrix
+    output = np.squeeze(outputs[0])  # Access raw prediction matrix layer
 
     predictions = []
     draw = ImageDraw.Draw(original_image)
 
-    # Parse bounding boxes
-    for row in output:
-        confidence = float(row[4])
-        if confidence >= conf_thresh:
-            # Get highest class score
+    # Standard loop to match YOLOv5 outputs shapes directly
+    if len(output.shape) == 2:
+        for row in output:
+            objectness = row[4]
             class_scores = row[5:]
             class_id = int(np.argmax(class_scores))
-            class_conf = float(class_scores[class_id])
-            
-            if class_conf > 0.25:
-                # Convert center x, center y, width, height format to 0-1 scale coordinates
-                x_center, y_center, w, h = row[0]/img_size, row[1]/img_size, row[2]/img_size, row[3]/img_size
-                xmin = max(0.0, x_center - w / 2)
-                ymin = max(0.0, y_center - h / 2)
-                xmax = min(1.0, x_center + w / 2)
-                ymax = min(1.0, y_center + h / 2)
+            confidence = float(objectness * class_scores[class_id])
+
+            if confidence >= conf_thresh:
+                x_center, y_center, w, h = row[0], row[1], row[2], row[3]
+                
+                # Convert boundaries safely relative to 224 grid limits
+                x1 = max(0.0, x_center - w / 2)
+                y1 = max(0.0, y_center - h / 2)
+                x2 = min(224.0, x_center + w / 2)
+                y2 = min(224.0, y_center + h / 2)
+
+                # Generate clean ratios (0 to 1)
+                xmin, ymin = x1 / 224.0, y1 / 224.0
+                xmax, ymax = x2 / 224.0, y2 / 224.0
 
                 predictions.append({
                     "class_id": class_id,
@@ -148,12 +157,17 @@ async def predict_thresholds(file: UploadFile = File(...), conf_thresh: float = 
                     "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax
                 })
 
-                # Draw bounding box using original raw pixel coordinates
                 draw.rectangle([xmin * orig_w, ymin * orig_h, xmax * orig_w, ymax * orig_h], outline="red", width=4)
 
-    # Encode image back to base64 string
     buffered = io.BytesIO()
     original_image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+    del original_image, image_bytes, img_data, outputs, output
+    gc.collect()
+
     return {"image": img_str, "predictions": predictions}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
